@@ -26,7 +26,7 @@ library(airtabler)
 #output <- paste0(user, "Data analysis/Output/")
 
 ## Retrieve SDG2000 Data and all CSI data from Airtable using API
-Sys.setenv("AIRTABLE_API_KEY" = "patSeFJxXRTCkCJb9.175246b8d869e81719918b35023682bf794b94be2b04eecac6d0e1fe3f82746e")
+Sys.setenv("AIRTABLE_API_KEY" = "insert_your_api")
 
 
 #Social Benchmark database
