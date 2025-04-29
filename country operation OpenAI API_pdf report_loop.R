@@ -10,7 +10,7 @@
 # so please make sure you have enough credits for it. For reference, the exercise below cost USD 0.03 
 # 
 # Created by: Ratih Dewi
-# Last modified: 07 March 2025
+# Last modified: 25 April 2025
 #
 
 #######################################################################################
@@ -28,9 +28,104 @@ library(dplyr)
 library(tidyr)
 library(tibble)
 library(purrr)
+library(countrycode)
 
-# Define the directory path containing PDF files
-pdf_dir <- "C:/Users/lprat/OneDrive - World Benchmarking Alliance/FAB/2024-2026 FAB/Data work/Raw/sources_repo/" # Modify this path
+
+## SET AIRTABLE API CONNECTION FOR SOURCE LIBRARY
+
+# Load the API keys needed from the environment
+api_key <- Sys.getenv("OPENAI_API_KEY")
+at_api_key <- Sys.getenv("AT_API_KEY")
+
+# Verify that the key is loaded
+if (nzchar(api_key)) {
+  print("OPENAI API key loaded successfully.")
+} else {
+  stop("OPENAI API key not found. Check your .Renviron file.")
+}
+
+if (nzchar(at_api_key)) {
+  print("AIRTABLE API key loaded successfully.")
+} else {
+  stop("AIRTABLE API key not found. Check your .Renviron file.")
+}
+
+# Airtable info
+base_id <- "appu5pLRjmq7PC4V3"
+table_id <- "tbluKsP1itMozQmHr"
+view_name <- "FAB 2025 Sources - Ratih copy"
+
+# Airtable API endpoint
+url <- paste0("https://api.airtable.com/v0/", base_id, "/", table_id)
+
+# Fetch records from the specific view
+offset <- NULL
+repeat {
+  query_params <- list(view = view_name)
+  if (!is.null(offset)) query_params$offset <- offset
+  
+  response <- GET(url,
+                  add_headers(Authorization = paste("Bearer", at_api_key)),
+                  query = query_params)
+  
+  content_list <- content(response, as = "parsed", simplifyVector = TRUE)
+  
+  # Check for pagination
+  if (is.null(content_list$offset)) break
+  offset <- content_list$offset
+}
+
+# Convert all records into a dataframe with all fields
+result_df <- data.frame(
+  SourceID = content_list$records$fields$`Source ID`,
+  Company = sapply(content_list$records$fields$`WBA Company Name`, function(x) {
+    if(is.list(x) && length(x) > 0) {
+      return(x[[1]])  # Extract first element of the list
+    } else if(is.character(x) && length(x) > 0) {
+      return(x[1])    # If it's already a character vector
+    } else {
+      return(NA)      # Handle empty or NULL cases
+    }
+  }),
+  SourceFile = sapply(content_list$records$fields$`Source File`, function(x) if(is.data.frame(x)) x$url[1] else NA),
+  SourceFileName = sapply(content_list$records$fields$`Source File`, function(x) if(is.data.frame(x)) x$filename[1] else NA),
+  stringsAsFactors = FALSE
+)
+
+# Add debug information - print structure of first record's Source File
+cat("Structure of first record's Source File field:\n")
+print(str(result_df$SourceFile[1]))
+
+# Remove duplicates and older document based on Source ID
+filtered_df <- result_df %>%
+  mutate(
+    base_id = str_replace(SourceID, "-(\\d{4})-\\d+$", ""),
+    year = as.numeric(str_extract(SourceID, "-(\\d{4})-") %>% str_replace_all("-", "")),
+    version = as.numeric(str_extract(SourceID, "-\\d+$") %>% str_replace("-", "")),
+    WBAID = str_sub(base_id, 1, 8)
+  ) %>%
+  group_by(base_id) %>%
+  filter(year == max(year)) %>%
+  filter(version == min(version)) %>%
+  select(-base_id, -year, -version)
+
+# Set your specific folder path  
+current_date <- format(Sys.Date(), "%d%m%Y")
+pdf_dir <- file.path("C:/Users/lprat/OneDrive - World Benchmarking Alliance/FAB/2024-2026 FAB/Data work/Raw/Source Library", current_date)
+if (!dir.exists(pdf_dir)) {
+  dir.create(pdf_dir, recursive = TRUE)
+}
+dir.create(pdf_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Download PDFs
+walk2(filtered_df$SourceFile, filtered_df$SourceID, function(url, source_id) {
+  if (!is.na(url)) {
+    destfile <- file.path(pdf_dir, paste0(source_id, ".pdf"))
+    download.file(url, destfile, mode = "wb")
+    cat("Downloaded:", destfile, "\n")
+  }
+})
+
 
 # List all PDF files in the directory
 pdf_files <- list.files(pdf_dir, pattern = "\\.pdf$", full.names = TRUE)
@@ -38,15 +133,8 @@ pdf_files <- list.files(pdf_dir, pattern = "\\.pdf$", full.names = TRUE)
 # Create an empty dataframe to store all results
 all_results <- tibble()
 
-# Load the API key from the environment
-api_key <- Sys.getenv("OPENAI_API_KEY")
 
-# Verify that the key is loaded
-if (nzchar(api_key)) {
-  print("API key loaded successfully.")
-} else {
-  stop("API key not found. Check your .Renviron file.")
-}
+## WRITE ALL FUNCTIONS NEEDED FOR THIS FLOW
 
 # Function to extract PDF content
 extract_pdf_content <- function(pdf_path) {
@@ -55,18 +143,18 @@ extract_pdf_content <- function(pdf_path) {
     warning(paste("PDF file does not exist at specified path:", pdf_path))
     return(NULL)
   }
-  
+
   tryCatch({
     # Read PDF and combine all pages
     content <- pdf_text(pdf_path)
-    
+
     # Combine all pages into a single string
     full_text <- paste(content, collapse = " ")
-    
+
     # Clean text (remove extra whitespace, special characters)
     clean_text <- gsub("\\s+", " ", full_text) %>%
       trimws()
-    
+
     return(clean_text)
   }, error = function(e) {
     warning(sprintf("Error reading PDF %s: %s", pdf_path, e$message))
@@ -75,7 +163,7 @@ extract_pdf_content <- function(pdf_path) {
 }
 
 # Function to split text into chunks at sentence boundaries
-split_text_at_boundaries <- function(text, target_size = 1000) {
+split_text_at_boundaries <- function(text, target_size = 2000) {
   # Split text into sentences (using periods, question marks, exclamation points as boundaries)
   sentences <- unlist(stringr::str_split(text, stringr::regex("(?<=[\\.\\?\\!])\\s+")))
   
@@ -180,6 +268,9 @@ extract_company_name <- function(file_path) {
   return(list(id = company_id))
 }
 
+
+## COMBINE ALL FUNCTION ABOVE TO CREATE A FUNCTION TO PROCESS A SINGLE PDF FILE
+
 # Function to process a single PDF file
 process_pdf <- function(pdf_path) {
   # Extract company information
@@ -249,7 +340,7 @@ process_pdf <- function(pdf_path) {
   similarities <- apply(embedding_vectors, 1, function(row) cosine_similarity(query_embedding, row))
   
   # Set a similarity threshold
-  similarity_threshold <- 0.78
+  similarity_threshold <- 0.75
   
   # Get indices of text chunks with similarity above the threshold
   matching_indices <- which(similarities >= similarity_threshold)
@@ -303,7 +394,7 @@ process_pdf <- function(pdf_path) {
   
   # Define the prompt
   prompt <- paste0(
-    "The following text provides information about a company's operations. Identify and list all countries where the company operates. A country of operation is defined as any location where the company has production facilities, processing facilities, subsidiaries, sales offices, retail stores, or restaurants. Only respond with the list of countries mentioned, using ISO 3166-1 alpha-3 codes (e.g., USA for United States). For each country, indicate the relevant type(s) of operation present — using only the specified categories. Format your response as:
+    "The following text provides information about a company's operations. Identify and list all countries where the company operates. A country of operation is defined as any location where the company has active production facilities, processing facilities, subsidiaries, sales offices, retail stores, or restaurants. Only respond with the list of countries mentioned, using ISO 3166-1 alpha-3 codes (e.g., USA for United States). For each country, indicate the relevant type(s) of operation present — using only the specified categories. Format your response as:
 USA – retail stores
 FRA – production facilities, subsidiaries",
     input_text,
@@ -399,12 +490,12 @@ FRA – production facilities, subsidiaries",
           unlist() %>%
           # Filter only valid lines matching the pattern "- XXX - description"
           keep(~ str_detect(.x, "^[A-Z]{3}\\s–\\s")) %>%
-          # Extract the country and business operations using regex
+          # Extract the country code and business operations using regex
           map(~ {
             matches <- str_match(.x, "^([A-Z]{3})\\s–\\s(.+)$")
             if (!is.na(matches[1])) {
               tibble(
-                country = matches[2],
+                countryISO = matches[2],
                 business_operations = matches[3]
               )
             } else {
@@ -416,11 +507,12 @@ FRA – production facilities, subsidiaries",
       )
     )
   
+  
   # Check if we have extracted data
   if (nrow(final_df) > 0 && any(sapply(final_df$extracted_data, nrow) > 0)) {
     final_df <- final_df %>%
       unnest(extracted_data) %>%
-      select(`WBA ID`, country, business_operations) %>% 
+      select(`WBA ID`, countryISO, business_operations) %>% 
       mutate(source = basename(pdf_path))
     
     cat("Successfully extracted", nrow(final_df), "country operations\n")
@@ -430,6 +522,8 @@ FRA – production facilities, subsidiaries",
     return(NULL)
   }
 }
+
+## NOW PROCESS PDF IN BATCH
 
 # Process each PDF file
 for (pdf_file in pdf_files) {
@@ -444,6 +538,13 @@ for (pdf_file in pdf_files) {
   # Add a small delay to prevent API rate limiting
   Sys.sleep(2)
 }
+
+# Add company and country name
+all_results <- all_results %>% 
+  left_join(filtered_df %>% select(WBAID, Company), by = c(`WBA ID` = "WBAID" )) %>% 
+  mutate(Country = countrycode(countryISO, "iso3c", "country.name")) %>% 
+  select(`WBA ID`, Company, countryISO, Country, business_operations, source)
+
 
 # Save the results
 output_file <- file.path(pdf_dir, "country_operations_results.csv")
